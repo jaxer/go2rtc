@@ -102,6 +102,17 @@ func NewServerAPI(network, address string, filters *Filters) (*webrtc.API, error
 		return nil, err
 	}
 
+	// Advertise the RTP audio-level header extension (RFC 6464) on outgoing
+	// audio. Browsers expose the per-packet level via
+	// RTCRtpReceiver.getSynchronizationSources()[].audioLevel, which lets
+	// the UI react to sound without spinning up a Web Audio analyser.
+	if err := m.RegisterHeaderExtension(
+		webrtc.RTPHeaderExtensionCapability{URI: AudioLevelURI},
+		webrtc.RTPCodecTypeAudio,
+	); err != nil {
+		return nil, err
+	}
+
 	i := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
 		return nil, err

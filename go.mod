@@ -37,6 +37,7 @@ require (
 	github.com/pion/datachannel v1.6.0 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
+	github.com/pion/opus v0.0.0-20260427180233-76b231fc6b3f // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/sctp v1.9.2 // indirect
 	github.com/pion/transport/v3 v3.1.1 // indirect
