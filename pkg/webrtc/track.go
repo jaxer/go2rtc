@@ -20,8 +20,14 @@ type Track struct {
 	// peer also negotiated the urn:ietf:params:rtp-hdrext:ssrc-audio-level
 	// extension. audioLevelExtID is the negotiated 1-byte extension ID
 	// (1..14); zero means "extension not present, skip".
+	//
+	// audioLevelByPT maps each negotiated audio PT to a per-codec computer.
+	// go2rtc may pick any negotiated codec at runtime (no transcode if the
+	// source already matches one of the offered codecs), so we have to
+	// dispatch by the payload type that arrives at WriteRTP — not by the
+	// "first" codec returned from Bind.
 	audioLevelExtID uint8
-	audioLevel      *audioLevelComputer
+	audioLevelByPT  map[uint8]*audioLevelComputer
 }
 
 func NewTrack(kind string) *Track {
@@ -45,13 +51,21 @@ func (t *Track) Bind(context webrtc.TrackLocalContext) (webrtc.RTPCodecParameter
 	}
 
 	// If the peer negotiated the audio-level extension AND this is an audio
-	// track, record the extension ID and prepare a per-track level computer.
-	if t.kind == "audio" && chosen.MimeType != "" {
+	// track, build a per-PT level-computer table. We can't know in advance
+	// which codec WriteRTP will be called with, so prepare them all.
+	if t.kind == "audio" {
 		for _, ext := range context.HeaderExtensions() {
 			if ext.URI == AudioLevelURI {
 				t.audioLevelExtID = uint8(ext.ID)
-				t.audioLevel = newAudioLevelComputer(chosen.MimeType)
 				break
+			}
+		}
+		if t.audioLevelExtID != 0 {
+			t.audioLevelByPT = make(map[uint8]*audioLevelComputer)
+			for _, p := range context.CodecParameters() {
+				if _, exists := t.audioLevelByPT[uint8(p.PayloadType)]; !exists {
+					t.audioLevelByPT[uint8(p.PayloadType)] = newAudioLevelComputer(p.MimeType)
+				}
 			}
 		}
 	}
@@ -67,7 +81,7 @@ func (t *Track) Unbind(context webrtc.TrackLocalContext) error {
 	t.mu.Lock()
 	t.writer = nil
 	t.audioLevelExtID = 0
-	t.audioLevel = nil
+	t.audioLevelByPT = nil
 	t.mu.Unlock()
 	return nil
 }
@@ -102,9 +116,11 @@ func (t *Track) WriteRTP(payloadType uint8, packet *rtp.Packet) (err error) {
 		header.PayloadType = payloadType
 		header.SequenceNumber = t.sequence
 
-		if t.audioLevelExtID != 0 && t.audioLevel != nil {
-			level, voice := t.audioLevel.level(packet.Payload)
-			t.setAudioLevelExt(&header, level, voice)
+		if t.audioLevelExtID != 0 {
+			if computer, ok := t.audioLevelByPT[payloadType]; ok && computer != nil {
+				level, voice := computer.level(packet.Payload)
+				t.setAudioLevelExt(&header, level, voice)
+			}
 		}
 
 		_, err = t.writer.WriteRTP(&header, packet.Payload)
