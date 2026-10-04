@@ -47,6 +47,22 @@ func NewConsumer() *Consumer {
 	}
 }
 
+// WithG711 also accepts PCMU and PCMA audio. Off by default, so a plain stream.ts request
+// keeps its exact output; standard players ignore these private stream types.
+func (c *Consumer) WithG711(pcmu, pcma bool) {
+	for _, media := range c.Medias {
+		if media.Kind != core.KindAudio {
+			continue
+		}
+		if pcmu {
+			media.Codecs = append(media.Codecs, &core.Codec{Name: core.CodecPCMU})
+		}
+		if pcma {
+			media.Codecs = append(media.Codecs, &core.Codec{Name: core.CodecPCMA})
+		}
+	}
+}
+
 func (c *Consumer) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiver) error {
 	sender := core.NewSender(media, track.Codec)
 
@@ -79,6 +95,26 @@ func (c *Consumer) AddTrack(media *core.Media, codec *core.Codec, track *core.Re
 
 		if track.Codec.IsRTP() {
 			sender.Handler = h265.RTPDepay(track.Codec, sender.Handler)
+		}
+
+	case core.CodecPCMU, core.CodecPCMA:
+		// G.711 as the Tapo-style private stream types the demuxer already reads (0x91, 0x90):
+		// the RTP payload as is, one PES per packet. Only offered when asked for, see WithG711.
+		st := byte(StreamTypePCMUTapo)
+		if track.Codec.Name == core.CodecPCMA {
+			st = StreamTypePCMATapo
+		}
+		pid := c.muxer.AddTrack(st)
+
+		// convert timestamp to 90000Hz clock
+		dt := 90000 / float64(track.Codec.ClockRate)
+
+		sender.Handler = func(pkt *rtp.Packet) {
+			pts := uint32(float64(pkt.Timestamp) * dt)
+			b := c.muxer.GetPayload(pid, pts, pkt.Payload)
+			if n, err := c.wr.Write(b); err == nil {
+				c.Send += n
+			}
 		}
 
 	case core.CodecAAC:
