@@ -24,7 +24,7 @@ func (m *Muxer) AddTrack(streamType byte) (pid uint16) {
 	switch streamType {
 	case StreamTypeH264, StreamTypeH265:
 		pes.StreamID = 0xE0
-	case StreamTypeAAC, StreamTypePCMATapo:
+	case StreamTypeAAC, StreamTypePCMATapo, StreamTypePCMUTapo:
 		pes.StreamID = 0xC0
 	}
 

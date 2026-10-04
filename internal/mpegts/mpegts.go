@@ -2,6 +2,7 @@ package mpegts
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/AlexxIT/go2rtc/internal/api"
 	"github.com/AlexxIT/go2rtc/internal/streams"
@@ -31,6 +32,17 @@ func outputMpegTS(w http.ResponseWriter, r *http.Request) {
 
 	cons := mpegts.NewConsumer()
 	cons.WithRequest(r)
+	// ?audio=pcmu,pcma adds G.711 next to AAC (any other value is ignored)
+	if values := r.URL.Query()["audio"]; len(values) > 0 {
+		var pcmu, pcma bool
+		for _, v := range values {
+			for _, name := range strings.Split(strings.ToLower(v), ",") {
+				pcmu = pcmu || name == "pcmu"
+				pcma = pcma || name == "pcma"
+			}
+		}
+		cons.WithG711(pcmu, pcma)
+	}
 
 	if err := stream.AddConsumer(cons); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
