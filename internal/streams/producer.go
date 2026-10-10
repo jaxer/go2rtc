@@ -182,6 +182,11 @@ func (p *Producer) reconnect(workerID, retry int) {
 		return
 	}
 
+	if p.pruneClosedTalkback() {
+		p.stopLocked()
+		return
+	}
+
 	log.Debug().Msgf("[streams] retry=%d to url=%s", retry, p.url)
 
 	conn, err := GetProducer(p.url)
@@ -200,6 +205,12 @@ func (p *Producer) reconnect(workerID, retry int) {
 		time.AfterFunc(timeout, func() {
 			p.reconnect(workerID, retry+1)
 		})
+		return
+	}
+	// Dial can block while the browser disconnects. Do not revive its mic.
+	if p.pruneClosedTalkback() {
+		_ = conn.Stop()
+		p.stopLocked()
 		return
 	}
 
@@ -224,6 +235,9 @@ func (p *Producer) reconnect(workerID, retry int) {
 
 		case core.DirectionSendonly:
 			for _, sender := range p.senders {
+				if sender.Closed() {
+					continue
+				}
 				codec := media.MatchCodec(sender.Codec)
 				if codec == nil {
 					continue
@@ -232,6 +246,11 @@ func (p *Producer) reconnect(workerID, retry int) {
 				_ = conn.(core.Consumer).AddTrack(media, codec, sender)
 			}
 		}
+	}
+	if p.pruneClosedTalkback() {
+		_ = conn.Stop()
+		p.stopLocked()
+		return
 	}
 
 	// stop previous connection after moving tracks (fix ghost exec/ffmpeg)
@@ -242,10 +261,29 @@ func (p *Producer) reconnect(workerID, retry int) {
 	go p.worker(conn, workerID)
 }
 
+// Called with p.mu held. True means this backchannel has no live microphone
+// sources and no incoming media to keep its connection alive.
+func (p *Producer) pruneClosedTalkback() bool {
+	if len(p.senders) == 0 {
+		return false
+	}
+	active := p.senders[:0]
+	for _, sender := range p.senders {
+		if !sender.Closed() {
+			active = append(active, sender)
+		}
+	}
+	p.senders = active
+	return len(active) == 0 && len(p.receivers) == 0
+}
+
 func (p *Producer) stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.stopLocked()
+}
 
+func (p *Producer) stopLocked() {
 	switch p.state {
 	case stateExternal:
 		log.Trace().Msgf("[streams] skip stop external producer")
