@@ -11,6 +11,7 @@ var ErrCantGetTrack = errors.New("can't get track")
 
 type Receiver struct {
 	Node
+	closed bool // protected by Node.mu; a disconnected source cannot be reattached
 
 	// Deprecated: should be removed
 	Media *Media `json:"-"`
@@ -56,7 +57,20 @@ func (r *Receiver) Replace(target *Receiver) {
 }
 
 func (r *Receiver) Close() {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.closed = true
+	r.mu.Unlock()
 	r.Node.Close()
+}
+
+func (r *Receiver) Closed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
 }
 
 type Sender struct {
@@ -126,7 +140,15 @@ func (s *Sender) Bind(parent *Receiver) {
 }
 
 func (s *Sender) WithParent(parent *Receiver) *Sender {
-	s.Node.WithParent(&parent.Node)
+	parent.mu.Lock()
+	if parent.closed {
+		parent.mu.Unlock()
+		s.Close()
+		return s
+	}
+	parent.childs = append(parent.childs, &s.Node)
+	s.parent = &parent.Node
+	parent.mu.Unlock()
 	return s
 }
 
