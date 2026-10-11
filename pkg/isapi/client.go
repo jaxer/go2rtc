@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -62,6 +63,17 @@ func Dial(rawURL string) (*Client, error) {
 			return nil, errors.New("isapi: gain requires mix=1")
 		}
 	}
+	targetRMS := 4096.0 // preserve the original approximately -18 dBFS default
+	if v := opts.Get("target"); v != "" {
+		dBFS, parseErr := strconv.ParseFloat(v, 64)
+		if parseErr != nil || !(dBFS >= -24 && dBFS <= -6) {
+			return nil, errors.New("isapi: target must be -24..-6 dBFS")
+		}
+		if !mixed || gainDB == 0 {
+			return nil, errors.New("isapi: target requires mix=1 and positive gain")
+		}
+		targetRMS = 32768 * math.Pow(10, dBFS/20)
+	}
 	u.Fragment = ""
 	u.Scheme = "http"
 	u.Path = ""
@@ -74,6 +86,7 @@ func Dial(rawURL string) (*Client, error) {
 	}
 	if mixed {
 		client.mixer = newSpeechMixer(client.medias[0].Codecs[0].Name, gainDB)
+		client.mixer.targetRMS = targetRMS
 	}
 	return client, nil
 }
