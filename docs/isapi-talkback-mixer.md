@@ -95,3 +95,27 @@ Apple M4 Pro sample benchmark (processing one 20 ms frame, including input decod
 or end-to-end audio latency. Frank's CPU-only Linux amd64 artifact is cross-built;
 no binary, configuration, benchmark workload or service change has been applied
 there for this feature. Deployment, restart and rollback require explicit approval.
+
+## Live trial follow-up: dedicated microphone stream
+
+The first trial successfully forwarded real panel microphone bytes through a shared
+low/high ISAPI session, but concurrent connections produced intermittent panel
+listening/setup failures. That trial was rolled back. A locally reproduced RTSP
+limitation rejects a microphone-only session with 404 because the server required
+playback senders even when a backchannel receiver exists. The server fix accepts
+receiver-only sessions; its isolated DESCRIBE/SETUP/PLAY regression fails before
+and passes after the change.
+
+For the panel, add a dedicated stream with the **same** ISAPI source/options:
+
+```yaml
+streams:
+  gate_talk: isapi://USER:PASS@gate/#mix=1#gain=24
+```
+
+Use `rtsp://GO2RTC:8554/gate_talk?backchannel=1` for its outgoing microphone. This
+shares the ISAPI session with HA/TV low/high views without creating an unnecessary
+camera RTSP playback connection for the panel's microphone. Incoming panel audio
+remains direct. This removes a known dependency; a connection-limit hypothesis for
+the observed failure is not yet proven. The revised route needs separate live
+acceptance and deployment approval; no second candidate deployment has occurred.
