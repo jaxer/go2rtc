@@ -19,12 +19,13 @@ const maxParticipants = 8
 // It is deliberately G.711-only: no process, resampler or codec negotiation is
 // hidden here. WebRTC/RTSP clients negotiate the camera's advertised G.711 codec.
 type speechMixer struct {
-	mu      sync.Mutex
-	inputs  map[*core.Receiver]*mixInput
-	output  string
-	maxGain float64
-	limiter float64
-	dropped uint64
+	mu        sync.Mutex
+	inputs    map[*core.Receiver]*mixInput
+	output    string
+	maxGain   float64
+	targetRMS float64
+	limiter   float64
+	dropped   uint64
 }
 
 type mixInput struct {
@@ -42,7 +43,7 @@ type mixInput struct {
 }
 
 func newSpeechMixer(codec string, gainDB float64) *speechMixer {
-	return &speechMixer{inputs: make(map[*core.Receiver]*mixInput), output: codec, maxGain: math.Pow(10, gainDB/20), limiter: 1}
+	return &speechMixer{inputs: make(map[*core.Receiver]*mixInput), output: codec, maxGain: math.Pow(10, gainDB/20), targetRMS: 4096, limiter: 1}
 }
 
 func (m *speechMixer) add(media *core.Media, source *core.Receiver) (*core.Sender, error) {
@@ -170,7 +171,7 @@ func (m *speechMixer) read(out []byte, now time.Time) bool {
 		target := 1.0
 		rms := math.Sqrt(energy / frameSamples)
 		if m.maxGain > 1 && rms >= 32 { // don't drive gain upward on digital silence
-			target = math.Min(m.maxGain, 4096/rms) // approximately -18 dBFS speech RMS
+			target = math.Min(m.maxGain, m.targetRMS/rms)
 		} else if rms < 32 {
 			target = input.gain
 		}

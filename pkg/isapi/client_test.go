@@ -24,7 +24,9 @@ func channels(w http.ResponseWriter) {
 func TestDialMixerOptions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { channels(w) }))
 	defer server.Close()
-	for _, opt := range []string{"#gain=24", "#mix=1#gain=25", "#mix=1#gain=NaN", "#mix=1#gain=-1"} {
+	for _, opt := range []string{"#gain=24", "#mix=1#gain=25", "#mix=1#gain=NaN", "#mix=1#gain=-1",
+		"#target=-12", "#mix=1#target=-12", "#mix=1#gain=24#target=NaN",
+		"#mix=1#gain=24#target=-25", "#mix=1#gain=24#target=-5"} {
 		if c, err := Dial(cameraURL(server, opt)); err == nil {
 			c.Stop()
 			t.Fatalf("accepted %s", opt)
@@ -37,6 +39,17 @@ func TestDialMixerOptions(t *testing.T) {
 	defer c.Stop()
 	if c.mixer == nil || c.mixer.maxGain < 15 {
 		t.Fatal("mix options ignored")
+	}
+	if c.mixer.targetRMS != 4096 {
+		t.Fatal("default target changed")
+	}
+	louder, err := Dial(cameraURL(server, "#mix=1#gain=24#target=-12"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer louder.Stop()
+	if louder.mixer.targetRMS < 8200 || louder.mixer.targetRMS > 8240 {
+		t.Fatal("speech target ignored")
 	}
 }
 func TestMixedCameraSession(t *testing.T) {

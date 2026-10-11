@@ -33,7 +33,7 @@ resampler, GPU or Cgo dependency is required. An unsupported format fails explic
   discarded. Duplicate/out-of-order RTP is rejected, including sequence rollover.
 - A 75 Hz high-pass removes DC/low rumble. Missing audio contributes PCM zero;
   silent participants never divide down another speaker's level.
-- Optional per-input gain targets roughly -18 dBFS RMS, bounded by `gain` (24 dB
+- Optional per-input gain defaults to roughly -18 dBFS RMS, bounded by `gain` (24 dB
   is about 15.8x). Gain rises at 6 dB/s and falls at 60 dB/s. Digital silence does
   not raise gain; there is no hard voice-activity gate to discard whispered words.
 - Summed output has an immediate peak limiter with a 120 ms release and headroom
@@ -119,3 +119,23 @@ stays in local tests. Run `go test -race ./internal/rtsp` alongside the suites a
 The revised build/configuration still need a separately approved live trial. These
 local results do not establish physical audibility, device readiness, simultaneous
 real speech, direct fallback during a real gateway outage, or whisper quality.
+
+
+## Speech loudness target
+
+With mixing and positive gain enabled, `#target=-12` sets the desired per-input
+speech RMS to -12 dBFS, about 6 dB above the default. Accepted range: -24 to -6 dBFS.
+This changes the desired speech level, not the maximum amplification (`gain`) or
+final peak ceiling. Very quiet sources can still hit the gain cap before reaching
+the target. Apply identical options to every view of that camera; omit the option
+to preserve the original target. The limiter still controls summed peaks.
+
+The second approved live trial (d7a0556 / panel1489364) passed eight real panel
+holds, two- and three-input gate mixing, WebRTC+RTSP mixing on all three cameras,
+remaining-client continuity, last-client cleanup, and a real gateway outage/direct
+fallback/recovery. Panel video/listening stayed direct and HA presence/fade was
+restored. HA/TV transport probes used real earlier voice recordings, not their
+actual user interfaces. Alex heard the gate playback: approximately okay but could
+be louder. SDK readback confirms both gate output volume controls are already10/10.
+A gate-only -12 dBFS target is therefore prepared for a further approved trial;
+physical whisper quality and the louder setting still need acceptance.

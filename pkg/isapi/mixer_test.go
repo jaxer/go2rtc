@@ -216,3 +216,52 @@ func BenchmarkMixer(b *testing.B) {
 		})
 	}
 }
+
+func TestMixerHigherSpeechTargetKeepsPeakAndGainBounds(t *testing.T) {
+	for _, codec := range []string{core.CodecPCMU, core.CodecPCMA} {
+		t.Run(codec, func(t *testing.T) {
+			var levels []float64
+			for _, targetRMS := range []float64{4096, 8192} {
+				m := newSpeechMixer(codec, 24)
+				m.targetRMS = targetRMS
+				in := testInput(m, codec)
+				now := time.Now()
+				out := make([]byte, 160)
+				for i := 0; i < 300; i++ {
+					feed(m, in, tone(codec, 2000, 10), uint16(i), uint32(i*160), now)
+					m.read(out, now)
+					now = now.Add(20 * time.Millisecond)
+				}
+				var energy float64
+				for _, v := range out {
+					x := pcm.PCMUtoPCM(v)
+					if codec == core.CodecPCMA {
+						x = pcm.PCMAtoPCM(v)
+					}
+					energy += float64(x) * float64(x)
+				}
+				levels = append(levels, math.Sqrt(energy/160))
+				if in.gain > m.maxGain {
+					t.Fatal("gain cap exceeded")
+				}
+				for j := 0; j < 7; j++ {
+					feed(m, testInput(m, codec), tone(codec, 30000, 10), 1, 0, now)
+				}
+				feed(m, in, tone(codec, 30000, 10), 300, 48000, now)
+				m.read(out, now)
+				for _, v := range out {
+					x := pcm.PCMUtoPCM(v)
+					if codec == core.CodecPCMA {
+						x = pcm.PCMAtoPCM(v)
+					}
+					if math.Abs(float64(x)) > 28500 {
+						t.Fatal("higher speech target bypassed peak limiter")
+					}
+				}
+			}
+			if ratio := levels[1] / levels[0]; ratio < 1.9 || ratio > 2.1 {
+				t.Fatalf("6dB target change: RMS ratio=%f", ratio)
+			}
+		})
+	}
+}
