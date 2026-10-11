@@ -5,11 +5,11 @@ Opt in per camera source:
 ```yaml
 streams:
   gate_low:
+    - isapi://USER:PASS@gate/#mix=1#gain=24
     - rtsp://USER:PASS@gate/Streaming/Channels/102#backchannel=0
-    - isapi://USER:PASS@gate/#mix=1#gain=24
   gate_high:
-    - rtsp://USER:PASS@gate/Streaming/Channels/101#backchannel=0
     - isapi://USER:PASS@gate/#mix=1#gain=24
+    - rtsp://USER:PASS@gate/Streaming/Channels/101#backchannel=0
 ```
 
 Keep the same canonical host, credentials and mixer options in both views. Mixing
@@ -93,29 +93,29 @@ Apple M4 Pro sample benchmark (processing one 20 ms frame, including input decod
 1 microphone 2.5 μs; 3 microphones 4.6 μs; 8 microphones 9.2 μs. All reported
 0 allocations/frame. These are isolated Mac measurements, not Frank performance
 or end-to-end audio latency. Frank's CPU-only Linux amd64 artifact is cross-built;
-no binary, configuration, benchmark workload or service change has been applied
-there for this feature. Deployment, restart and rollback require explicit approval.
+the first live trial was rolled back. Production is on the previous build and
+configuration. Further deployment, restart and rollback require explicit approval.
 
-## Live trial follow-up: dedicated microphone stream
+## Live trial follow-up: existing stream, microphone only
 
-The first trial successfully forwarded real panel microphone bytes through a shared
-low/high ISAPI session, but concurrent connections produced intermittent panel
-listening/setup failures. That trial was rolled back. A locally reproduced RTSP
-limitation rejects a microphone-only session with 404 because the server required
-playback senders even when a backchannel receiver exists. The server fix accepts
-receiver-only sessions; its isolated DESCRIBE/SETUP/PLAY regression fails before
-and passes after the change.
+The first trial forwarded real panel microphone bytes through a shared low/high
+ISAPI session, but concurrent connections produced intermittent panel listening/setup
+failures. It was rolled back; their exact cause is still unproven.
 
-For the panel, add a dedicated stream with the **same** ISAPI source/options:
+Use `rtsp://GO2RTC:8554/gate_low?backchannel=only` for the panel microphone. No
+additional stream is needed. This explicit request suppresses default playback
+tracks. Put the ISAPI source first, as above, so stream selection finds the
+microphone destination without first dialing the camera's RTSP playback source.
+Incoming panel audio/video remain direct. Existing `backchannel=1` keeps its
+playback-plus-microphone semantics for other clients.
 
-```yaml
-streams:
-  gate_talk: isapi://USER:PASS@gate/#mix=1#gain=24
-```
+The server also accepts receiver-only RTSP sessions (older builds reject these
+with 404). An isolated test exercises the production RTSP handler, stream selection,
+G.711 mixer and fake camera's raw ISAPI socket: same-view and cross-view clients,
+actual RTP delivery, one camera open, leaving one participant, final cleanup and
+reopening. It asserts that no playback source is contacted. All generated audio
+stays in local tests. Run `go test -race ./internal/rtsp` alongside the suites above.
 
-Use `rtsp://GO2RTC:8554/gate_talk?backchannel=1` for its outgoing microphone. This
-shares the ISAPI session with HA/TV low/high views without creating an unnecessary
-camera RTSP playback connection for the panel's microphone. Incoming panel audio
-remains direct. This removes a known dependency; a connection-limit hypothesis for
-the observed failure is not yet proven. The revised route needs separate live
-acceptance and deployment approval; no second candidate deployment has occurred.
+The revised build/configuration still need a separately approved live trial. These
+local results do not establish physical audibility, device readiness, simultaneous
+real speech, direct fallback during a real gateway outage, or whisper quality.
