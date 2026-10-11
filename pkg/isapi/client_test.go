@@ -26,6 +26,7 @@ func TestDialMixerOptions(t *testing.T) {
 	defer server.Close()
 	for _, opt := range []string{"#gain=24", "#mix=1#gain=25", "#mix=1#gain=NaN", "#mix=1#gain=-1",
 		"#target=-12", "#mix=1#target=-12", "#mix=1#gain=24#target=NaN",
+		"#compress=moderate", "#mix=1#compress=unknown",
 		"#mix=1#gain=24#target=-25", "#mix=1#gain=24#target=-5"} {
 		if c, err := Dial(cameraURL(server, opt)); err == nil {
 			c.Stop()
@@ -40,8 +41,19 @@ func TestDialMixerOptions(t *testing.T) {
 	if c.mixer == nil || c.mixer.maxGain < 15 {
 		t.Fatal("mix options ignored")
 	}
+	if c.mixer.compression != nil {
+		t.Fatal("compression must default off")
+	}
 	if c.mixer.targetRMS != 4096 {
 		t.Fatal("default target changed")
+	}
+	compressed, err := Dial(cameraURL(server, "#mix=1#gain=24#target=-6#compress=moderate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compressed.Stop()
+	if compressed.mixer.compression == nil {
+		t.Fatal("compression ignored")
 	}
 	louder, err := Dial(cameraURL(server, "#mix=1#gain=24#target=-12"))
 	if err != nil {
