@@ -8,6 +8,6 @@ import (
 
 func Init() {
 	streams.HandleFunc("isapi", func(source string) (core.Producer, error) {
-		return isapi.Dial(source)
+		return isapi.DialShared(source)
 	})
 }

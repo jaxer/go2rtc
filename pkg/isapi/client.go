@@ -1,11 +1,17 @@
 package isapi
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/tcp"
@@ -19,9 +25,16 @@ type Client struct {
 	channel string
 	conn    net.Conn
 
-	medias []*core.Media
-	sender *core.Sender
-	send   int
+	medias  []*core.Media
+	sender  *core.Sender
+	senders []*core.Sender
+	mixer   *speechMixer
+	mu      sync.Mutex
+	stopped bool
+	opened  bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	send    int
 }
 
 func Dial(rawURL string) (*Client, error) {
@@ -31,19 +44,45 @@ func Dial(rawURL string) (*Client, error) {
 		return nil, err
 	}
 
+	opts, err := url.ParseQuery(strings.ReplaceAll(u.Fragment, "#", "&"))
+	if err != nil {
+		return nil, err
+	}
+	if v := opts.Get("mix"); v != "" && v != "0" && v != "1" {
+		return nil, errors.New("isapi: mix must be 0 or 1")
+	}
+	mixed := opts.Get("mix") == "1"
+	gainDB := 0.0
+	if v := opts.Get("gain"); v != "" {
+		gainDB, err = strconv.ParseFloat(v, 64)
+		if err != nil || !(gainDB >= 0 && gainDB <= 24) {
+			return nil, errors.New("isapi: gain must be 0..24 dB")
+		}
+		if !mixed {
+			return nil, errors.New("isapi: gain requires mix=1")
+		}
+	}
+	u.Fragment = ""
 	u.Scheme = "http"
 	u.Path = ""
 
-	client := &Client{url: u.String()}
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &Client{url: u.String(), ctx: ctx, cancel: cancel}
 	if err = client.Dial(); err != nil {
+		cancel()
 		return nil, err
 	}
-	return client, err
+	if mixed {
+		client.mixer = newSpeechMixer(client.medias[0].Codecs[0].Name, gainDB)
+	}
+	return client, nil
 }
 
 func (c *Client) Dial() (err error) {
 	link := c.url + "/ISAPI/System/TwoWayAudio/channels"
-	req, err := http.NewRequest("GET", link, nil)
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", link, nil)
 	if err != nil {
 		return err
 	}
@@ -58,7 +97,8 @@ func (c *Client) Dial() (err error) {
 		return errors.New(res.Status)
 	}
 
-	b, err := io.ReadAll(res.Body)
+	defer tcp.Close(res)
+	b, err := io.ReadAll(io.LimitReader(res.Body, 65536))
 	if err != nil {
 		return err
 	}
@@ -72,7 +112,7 @@ func (c *Client) Dial() (err error) {
 	case "G.711alaw":
 		codec = core.CodecPCMA
 	default:
-		return nil
+		return errors.New("isapi: unsupported audio codec")
 	}
 
 	c.channel = core.Between(xml, `<id>`, `<`)
@@ -89,76 +129,126 @@ func (c *Client) Dial() (err error) {
 	return nil
 }
 
-func (c *Client) Open() (err error) {
-	// Hikvision ISAPI may not accept a new open request if the previous one was not closed (e.g.
-	// using the test button on-camera or via curl command) but a close request can be sent even if
-	// the audio is already closed. So, we send a close request first and then open it again. Seems
-	// janky but it works.
-	if err = c.Close(); err != nil {
+// Open owns a single device session for all microphones attached to this producer.
+func (c *Client) Open() error {
+	c.mu.Lock()
+	stoppedBeforeStart := c.stopped
+	c.mu.Unlock()
+	if stoppedBeforeStart {
+		return context.Canceled
+	}
+	// Preserve the existing recovery behavior only for non-mixing sources. A mixed
+	// source must not forcibly close a stock call or another device's talk session.
+	if c.mixer == nil {
+		if err := c.command(c.ctx, "close"); err != nil {
+			return err
+		}
+	}
+	if err := c.command(c.ctx, "open"); err != nil {
 		return err
 	}
-
-	link := c.url + "/ISAPI/System/TwoWayAudio/channels/" + c.channel
-	req, err := http.NewRequest("PUT", link+"/open", nil)
+	c.mu.Lock()
+	c.opened = true
+	stopped := c.stopped
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		opened := c.opened
+		c.opened = false
+		c.mu.Unlock()
+		if opened {
+			_ = c.Close()
+		}
+	}()
+	if stopped {
+		return context.Canceled
+	}
+	ctx, cancel := context.WithCancel(c.ctx)
+	defer cancel()
+	conn, reader, err := c.openAudio(ctx)
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return context.Canceled
+	}
+	c.conn = conn
+	c.mu.Unlock()
+	defer func() { c.mu.Lock(); c.conn = nil; c.mu.Unlock() }()
+	done := make(chan struct{})
+	if c.mixer != nil {
+		go func() { defer close(done); c.mixTo(ctx, conn) }()
+	} else {
+		close(done)
+	}
+	// Discard any camera response/uplink bytes until disconnect; a response
+	// body must not terminate the outgoing conversation.
+	_, err = io.Copy(io.Discard, reader)
+	conn.Close()
+	// A write deadline also bounds the mixer when the peer stops reading.
+	if c.mixer != nil {
+		cancel()
+		<-done
+	}
+	return err
+}
 
+func (c *Client) command(parent context.Context, command string) error {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	link := c.url + "/ISAPI/System/TwoWayAudio/channels/" + c.channel + "/" + command
+	req, err := http.NewRequestWithContext(ctx, "PUT", link, nil)
+	if err != nil {
+		return err
+	}
 	res, err := tcp.Do(req)
 	if err != nil {
-		return
+		return err
 	}
-
-	tcp.Close(res)
-
-	ctx, pconn := tcp.WithConn()
-	req, err = http.NewRequestWithContext(ctx, "PUT", link+"/audioData", nil)
+	defer tcp.Close(res)
+	body, err := io.ReadAll(io.LimitReader(res.Body, 65536))
 	if err != nil {
 		return err
 	}
-
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("Content-Length", "0")
-
-	res, err = tcp.Do(req)
-	if err != nil {
-		return err
+	code := core.Between(string(body), "<statusCode>", "<")
+	if res.StatusCode != 200 || (code != "" && code != "1") {
+		return fmt.Errorf("isapi: %s HTTP %d status %s", command, res.StatusCode, code)
 	}
-
-	c.conn = *pconn
-
-	// just block until c.conn closed
-	b := make([]byte, 1)
-	_, _ = c.conn.Read(b)
-
-	tcp.Close(res)
-
 	return nil
 }
 
-func (c *Client) Close() (err error) {
-	link := c.url + "/ISAPI/System/TwoWayAudio/channels/" + c.channel
-	req, err := http.NewRequest("PUT", link+"/close", nil)
-	if err != nil {
-		return err
+func (c *Client) Close() error { return c.command(context.Background(), "close") }
+
+func (c *Client) mixTo(ctx context.Context, conn net.Conn) {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	var out [frameSamples]byte
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			stopped := c.stopped
+			c.mu.Unlock()
+			if stopped {
+				return
+			}
+			if !c.mixer.read(out[:], time.Now()) {
+				continue
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(750 * time.Millisecond))
+			n, err := conn.Write(out[:])
+			c.mu.Lock()
+			c.send += n
+			c.mu.Unlock()
+			if err != nil || n != len(out) {
+				conn.Close()
+				return
+			}
+		}
 	}
-
-	res, err := tcp.Do(req)
-	if err != nil {
-		return err
-	}
-
-	tcp.Close(res)
-
-	return nil
 }
-
-//type XMLChannels struct {
-//	Channels []Channel `xml:"TwoWayAudioChannel"`
-//}
-
-//type Channel struct {
-//	ID      string `xml:"id"`
-//	Enabled string `xml:"enabled"`
-//	Codec   string `xml:"audioCompressionType"`
-//}
