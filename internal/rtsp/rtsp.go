@@ -180,13 +180,17 @@ func tcpHandler(conn *rtsp.Conn) {
 
 			query := conn.URL.Query()
 			conn.Medias = ParseQuery(query)
-			if conn.Medias == nil {
+			backchannel := query.Get("backchannel")
+			if backchannel == "only" {
+				// Explicit microphone-only access to an existing camera stream.
+				conn.Medias = nil
+			} else if conn.Medias == nil {
 				for _, media := range defaultMedias {
 					conn.Medias = append(conn.Medias, media.Clone())
 				}
 			}
 
-			if query.Get("backchannel") == "1" {
+			if backchannel == "1" || backchannel == "only" {
 				conn.Medias = append(conn.Medias, &core.Media{
 					Kind:      core.KindAudio,
 					Direction: core.DirectionRecvonly,
