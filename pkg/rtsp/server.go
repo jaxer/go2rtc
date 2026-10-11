@@ -109,7 +109,8 @@ func (c *Conn) Accept() error {
 			c.mode = core.ModePassiveConsumer
 			c.Fire(MethodDescribe)
 
-			if c.Senders == nil {
+			// A microphone-only consumer needs receivers but no playback tracks.
+			if len(c.Senders) == 0 && len(c.Receivers) == 0 {
 				res := &tcp.Response{
 					Status:  "404 Not Found",
 					Request: req,
