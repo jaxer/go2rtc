@@ -74,6 +74,13 @@ func Dial(rawURL string) (*Client, error) {
 		}
 		targetRMS = 32768 * math.Pow(10, dBFS/20)
 	}
+	compression := opts.Get("compress")
+	if compression != "" && compression != "moderate" {
+		return nil, errors.New("isapi: compress must be moderate")
+	}
+	if compression != "" && !mixed {
+		return nil, errors.New("isapi: compress requires mix=1")
+	}
 	u.Fragment = ""
 	u.Scheme = "http"
 	u.Path = ""
@@ -87,6 +94,9 @@ func Dial(rawURL string) (*Client, error) {
 	if mixed {
 		client.mixer = newSpeechMixer(client.medias[0].Codecs[0].Name, gainDB)
 		client.mixer.targetRMS = targetRMS
+		if compression == "moderate" {
+			client.mixer.compression = moderateCompression(client.mixer.output)
+		}
 	}
 	return client, nil
 }

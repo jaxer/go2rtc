@@ -19,13 +19,14 @@ const maxParticipants = 8
 // It is deliberately G.711-only: no process, resampler or codec negotiation is
 // hidden here. WebRTC/RTSP clients negotiate the camera's advertised G.711 codec.
 type speechMixer struct {
-	mu        sync.Mutex
-	inputs    map[*core.Receiver]*mixInput
-	output    string
-	maxGain   float64
-	targetRMS float64
-	limiter   float64
-	dropped   uint64
+	mu          sync.Mutex
+	inputs      map[*core.Receiver]*mixInput
+	output      string
+	maxGain     float64
+	targetRMS   float64
+	compression *[256]byte // optional output-law lookup; no per-frame allocation/transcendentals
+	limiter     float64
+	dropped     uint64
 }
 
 type mixInput struct {
@@ -219,6 +220,30 @@ func (m *speechMixer) read(out []byte, now time.Time) bool {
 		} else {
 			out[i] = pcm.PCMtoPCMU(sample)
 		}
+		if m.compression != nil {
+			out[i] = m.compression[out[i]]
+		}
 	}
 	return true
+}
+
+// moderateCompression reproduces the accepted real-recording comparison:
+// existing limited G.711 output -> decode -> 28000*tanh(2*x/28000) -> encode.
+// Retaining the intermediate quantization makes the live result match the sample.
+// This soft saturation trades waveform fidelity for higher average speech level.
+func moderateCompression(codec string) *[256]byte {
+	table := new([256]byte)
+	for i := range table {
+		x := pcm.PCMUtoPCM(byte(i))
+		if codec == core.CodecPCMA {
+			x = pcm.PCMAtoPCM(byte(i))
+		}
+		y := int16(math.Round(28000 * math.Tanh(2*float64(x)/28000)))
+		if codec == core.CodecPCMA {
+			table[i] = pcm.PCMtoPCMA(y)
+		} else {
+			table[i] = pcm.PCMtoPCMU(y)
+		}
+	}
+	return table
 }

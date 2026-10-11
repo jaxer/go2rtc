@@ -95,9 +95,10 @@ actual raw audio writes, shared views and failed-session replacement.
 Apple M4 Pro sample benchmark (processing one 20 ms frame, including input decode):
 1 microphone 2.5 μs; 3 microphones 4.6 μs; 8 microphones 9.2 μs. All reported
 0 allocations/frame. These are isolated Mac measurements, not Frank performance
-or end-to-end audio latency. Frank's CPU-only Linux amd64 artifact is cross-built;
-the first live trial was rolled back. Production is on the previous build and
-configuration. Further deployment, restart and rollback require explicit approval.
+or end-to-end audio latency. Moderate compression measures approximately2.57μs
+per20ms single-input frame, versus2.54μs without it, with zero allocations on the
+same Mac. This is not a Frank benchmark. Linux amd64 artifacts are cross-built.
+Deployment, restart and rollback require explicit approval.
 
 ## Live trial follow-up: existing stream, microphone only
 
@@ -119,9 +120,6 @@ actual RTP delivery, one camera open, leaving one participant, final cleanup and
 reopening. It asserts that no playback source is contacted. All generated audio
 stays in local tests. Run `go test -race ./internal/rtsp` alongside the suites above.
 
-The revised build/configuration still need a separately approved live trial. These
-local results do not establish physical audibility, device readiness, simultaneous
-real speech, direct fallback during a real gateway outage, or whisper quality.
 
 
 ## Speech loudness target
@@ -140,14 +138,37 @@ fallback/recovery. Panel video/listening stayed direct and HA presence/fade was
 restored. HA/TV transport probes used real earlier voice recordings, not their
 actual user interfaces. Alex heard the gate playback: approximately okay but could
 be louder. SDK readback confirms both gate output volume controls are already10/10.
-A gate-only -12 dBFS target is therefore prepared for a further approved trial;
-physical whisper quality and the louder setting still need acceptance.
+Subsequent startup/target changes were deployed as8167bb5. Alex accepted actual
+HA-phone plus recorded speech mixing at the gate; the planned five-minute test
+was stopped after approximately111seconds. Longer endurance and real whisper
+quality remain unverified.
 
+## Optional moderate compression
 
-Alex also heard the first recording begin quietly and increase in volume. The
-original gain=1 startup with6dB/s rise explains a potential4-second ramp to24dB.
-The startup revision estimates gain from the first non-silent block, interpolates
-within20ms and retains the limiter. Fast adaptation during the first second handles
-a loud initial transient followed by quiet speech, then returns to the slower
-steady-state behavior. Regressions check initial silence, first quiet syllable,
-new holds and transient recovery. Prepared locally; requires new deployment approval.
+Use the same options on both views of each camera:
+
+```text
+#mix=1#gain=24#target=-6#compress=moderate
+```
+
+`compress` is omitted by default. Its only accepted explicit value is `moderate`,
+and it requires `mix=1`. Target and gain remain independently configured; the
+combination above reproduces the profile Alex accepted on gate, main-door and
+garage. Low/high options must match while sharing a physical camera session.
+
+After the existing summed peak limiter, the profile transforms the G.711 output
+as `28000*tanh(2*x/28000)` and encodes it again. This is soft saturation: it raises
+average speech level at the cost of waveform fidelity. It is not transparent
+compression, denoising or echo cancellation. The intermediate G.711 quantization
+is intentionally retained to match the accepted comparison exactly. A256-entry
+lookup table is built once per camera session: no per-frame allocations, extra
+buffering, transcendental calculations, subprocess or additional codec dependency.
+The existing final-output peak bound is retained, including quantization headroom.
+
+An isolated replay of the existing real voice capture through the new code matched
+all69120bytes of the accepted moderate sample. Both G.711 laws, one/three/eight
+inputs, silence, varying levels and peak bounds have regression coverage. Direct
+acoustic playback was accepted on all three cameras; deployment of this new option
+still requires approval. Current live8167bb5 has gain24 on all cameras, gate target-9,
+other cameras default target, and no compression. The panel's direct fallback
+continues its existing processing when the gateway is unavailable.
