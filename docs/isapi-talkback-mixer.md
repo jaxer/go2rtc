@@ -34,8 +34,11 @@ resampler, GPU or Cgo dependency is required. An unsupported format fails explic
 - A 75 Hz high-pass removes DC/low rumble. Missing audio contributes PCM zero;
   silent participants never divide down another speaker's level.
 - Optional per-input gain defaults to roughly -18 dBFS RMS, bounded by `gain` (24 dB
-  is about 15.8x). Gain rises at 6 dB/s and falls at 60 dB/s. Digital silence does
-  not raise gain; there is no hard voice-activity gate to discard whispered words.
+  is about 15.8x). Gain initializes from the first non-silent 20ms block with a
+  within-frame ramp, then adapts upward at60dB/s for the first second of active
+  audio and6dB/s afterward; downward adaptation is60dB/s. Digital silence does
+  not initialize/raise gain. There is no hard voice-activity gate to discard
+  whispered words. This level control can amplify room noise as well as speech.
 - Summed output has an immediate peak limiter with a 120 ms release and headroom
   for G.711 quantization. The high-pass and limiter also apply with `gain=0`.
 
@@ -139,3 +142,12 @@ actual user interfaces. Alex heard the gate playback: approximately okay but cou
 be louder. SDK readback confirms both gate output volume controls are already10/10.
 A gate-only -12 dBFS target is therefore prepared for a further approved trial;
 physical whisper quality and the louder setting still need acceptance.
+
+
+Alex also heard the first recording begin quietly and increase in volume. The
+original gain=1 startup with6dB/s rise explains a potential4-second ramp to24dB.
+The startup revision estimates gain from the first non-silent block, interpolates
+within20ms and retains the limiter. Fast adaptation during the first second handles
+a loud initial transient followed by quiet speech, then returns to the slower
+steady-state behavior. Regressions check initial silence, first quiet syllable,
+new holds and transient recovery. Prepared locally; requires new deployment approval.

@@ -265,3 +265,52 @@ func TestMixerHigherSpeechTargetKeepsPeakAndGainBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestMixerQuietSpeechDoesNotRampForSeconds(t *testing.T) {
+	m := newSpeechMixer(core.CodecPCMU, 24)
+	m.targetRMS = 8192
+	in := testInput(m, core.CodecPCMU)
+	out := make([]byte, 160)
+	now := time.Now()
+	// Initial digital silence must not consume startup adaptation or boost noise.
+	for i := 0; i < 10; i++ {
+		feed(m, in, bytes.Repeat([]byte{255}, 160), uint16(i), uint32(i*160), now)
+		m.read(out, now)
+		now = now.Add(20 * time.Millisecond)
+	}
+	if in.gainFrames != 0 || in.gain != 1 {
+		t.Fatal("silence initialized speech gain")
+	}
+	for i := 10; i < 12; i++ {
+		feed(m, in, tone(core.CodecPCMU, 160, 10), uint16(i), uint32(i*160), now)
+		m.read(out, now)
+		now = now.Add(20 * time.Millisecond)
+	}
+	if in.gain < 15 || in.gain > m.maxGain || level(out) < 1500 {
+		t.Fatalf("first quiet syllable still soft: gain=%f RMS=%f", in.gain, level(out))
+	}
+	// A new source/hold must initialize again, not inherit stale speech levels.
+	feed(m, in, tone(core.CodecPCMU, 160, 10), 0, 0, now.Add(time.Second))
+	m.read(out, now.Add(time.Second))
+	if in.gainFrames != 1 || in.gain < 15 {
+		t.Fatal("new hold lost fast startup")
+	}
+}
+
+func TestMixerRecoversFromLoudInitialTransient(t *testing.T) {
+	m := newSpeechMixer(core.CodecPCMU, 24)
+	m.targetRMS = 8192
+	in := testInput(m, core.CodecPCMU)
+	out := make([]byte, 160)
+	now := time.Now()
+	feed(m, in, tone(core.CodecPCMU, 30000, 10), 0, 0, now)
+	m.read(out, now)
+	for i := 1; i <= 35; i++ {
+		now = now.Add(20 * time.Millisecond)
+		feed(m, in, tone(core.CodecPCMU, 160, 10), uint16(i), uint32(i*160), now)
+		m.read(out, now)
+	}
+	if in.gain < 15 || in.gain > m.maxGain {
+		t.Fatalf("startup transient suppressed following quiet words: gain=%f", in.gain)
+	}
+}

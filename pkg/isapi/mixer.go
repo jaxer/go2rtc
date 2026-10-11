@@ -39,6 +39,7 @@ type mixInput struct {
 	received        time.Time
 	seen            bool
 	hpX, hpY, gain  float64
+	gainFrames      uint8
 	frame           [frameSamples]float64
 }
 
@@ -105,6 +106,7 @@ func (m *speechMixer) push(input *mixInput, packet *rtp.Packet, now time.Time) {
 		input.hpX = 0
 		input.hpY = 0
 		input.gain = 1
+		input.gainFrames = 0
 	}
 	input.seen = true
 	input.received = now
@@ -175,8 +177,21 @@ func (m *speechMixer) read(out []byte, now time.Time) bool {
 		} else if rms < 32 {
 			target = input.gain
 		}
-		// Gain rise 6 dB/s, fall 60 dB/s. Bound quiet input without pumping on pauses.
-		target = math.Max(input.gain*0.870964, math.Min(input.gain*1.013911, target))
+		// Initialize from the first non-silent block instead of making every new
+		// hold wait up to four seconds for quiet speech amplification. Ramp within
+		// this frame, with the final peak limiter still protecting the output.
+		if rms >= 32 && m.maxGain > 1 {
+			if input.gainFrames != 0 {
+				rise := 1.013911 // 6 dB/s once speech has settled
+				if input.gainFrames < 50 {
+					rise = 1.148154 // 60 dB/s during the first second of active audio
+				}
+				target = math.Max(input.gain*0.870964, math.Min(input.gain*rise, target))
+			}
+			if input.gainFrames < 50 {
+				input.gainFrames++
+			}
+		}
 		start := input.gain
 		for i, x := range input.frame {
 			mix[i] += x * (start + (target-start)*float64(i+1)/frameSamples)
