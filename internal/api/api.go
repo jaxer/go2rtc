@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/app"
+	"github.com/AlexxIT/go2rtc/pkg/isapi"
 	"github.com/rs/zerolog"
 )
 
@@ -274,6 +275,9 @@ func restartHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Debug().Msgf("[api] restart %s", path)
+
+	// Exec skips deferred cleanup; a camera keeps an unclosed talk session.
+	isapi.CloseSessions()
 
 	go syscall.Exec(path, os.Args, os.Environ())
 }

@@ -2,6 +2,7 @@ package isapi
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -199,4 +200,133 @@ func TestAudioDigestAndCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("handshake not canceled")
 	}
+}
+func TestStaleSessionReclaim(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		code         int
+		reclaim      bool
+	}{
+		{"camera", "", http.StatusNotFound, true},
+		{"idle intercom", "idle", http.StatusOK, true},
+		{"ringing intercom", "ring", http.StatusOK, false},
+		{"on call", "onCall", http.StatusOK, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var held atomic.Bool
+			var closes, opens atomic.Int32
+			held.Store(true)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/channels"):
+					channels(w)
+				case strings.HasSuffix(r.URL.Path, "/callStatus"):
+					w.WriteHeader(tc.code)
+					io.WriteString(w, `{"CallStatus":{"status":"`+tc.status+`"}}`)
+				case strings.HasSuffix(r.URL.Path, "/close"):
+					closes.Add(1)
+					held.Store(false)
+					io.WriteString(w, `<statusCode>1</statusCode>`)
+				case strings.HasSuffix(r.URL.Path, "/open"):
+					opens.Add(1)
+					if held.Load() {
+						w.WriteHeader(http.StatusForbidden)
+						io.WriteString(w, `<statusCode>4</statusCode>`)
+						return
+					}
+					io.WriteString(w, `<statusCode>1</statusCode>`)
+				}
+			}))
+			defer server.Close()
+			c, err := Dial(cameraURL(server, "#mix=1"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Stop()
+			err = c.claim()
+			if tc.reclaim != (err == nil) || tc.reclaim != (closes.Load() == 1) {
+				t.Fatalf("reclaim=%v err=%v closes=%d", tc.reclaim, err, closes.Load())
+			}
+			if !tc.reclaim && !errors.Is(err, errInvalidOperation) {
+				t.Fatalf("busy not reported: %v", err)
+			}
+			if tc.reclaim && opens.Load() != 2 {
+				t.Fatalf("opens=%d", opens.Load())
+			}
+		})
+	}
+}
+func TestRefusedOpenBacksOff(t *testing.T) {
+	var opens atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/channels"):
+			channels(w)
+		case strings.HasSuffix(r.URL.Path, "/open"):
+			opens.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `<statusCode>4</statusCode>`)
+		default:
+			io.WriteString(w, `{"CallStatus":{"status":"onCall"}}`)
+		}
+	}))
+	defer server.Close()
+	c, err := Dial(cameraURL(server, "#mix=1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	start := time.Now()
+	_ = c.claim()
+	_ = c.claim()
+	_ = c.claim()
+	if elapsed := time.Since(start); elapsed < 3*time.Second || opens.Load() != 3 {
+		t.Fatalf("no backoff: %v opens=%d", elapsed, opens.Load())
+	}
+	c.Stop()
+	begin := time.Now()
+	if err := c.claim(); err != context.Canceled || time.Since(begin) > time.Second {
+		t.Fatalf("stopped client still waits: %v", err)
+	}
+}
+func TestCloseSessions(t *testing.T) {
+	var closes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/channels"):
+			channels(w)
+		case strings.HasSuffix(r.URL.Path, "/close"):
+			closes.Add(1)
+			io.WriteString(w, `<statusCode>1</statusCode>`)
+		case strings.HasSuffix(r.URL.Path, "/audioData"):
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		default:
+			io.WriteString(w, `<statusCode>1</statusCode>`)
+		}
+	}))
+	defer server.Close()
+	c, err := Dial(cameraURL(server, "#mix=1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go c.Start()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		n := 0
+		openSessions.Range(func(any, any) bool { n++; return true })
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	CloseSessions()
+	if closes.Load() != 1 {
+		t.Fatalf("closes=%d", closes.Load())
+	}
+	c.Stop()
 }
