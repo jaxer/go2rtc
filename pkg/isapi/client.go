@@ -2,6 +2,7 @@ package isapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
@@ -167,14 +169,16 @@ func (c *Client) Open() error {
 			return err
 		}
 	}
-	if err := c.command(c.ctx, "open"); err != nil {
+	if err := c.claim(); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	c.opened = true
 	stopped := c.stopped
 	c.mu.Unlock()
+	openSessions.Store(c, struct{}{})
 	defer func() {
+		openSessions.Delete(c)
 		c.mu.Lock()
 		opened := c.opened
 		c.opened = false
@@ -219,6 +223,86 @@ func (c *Client) Open() error {
 	return err
 }
 
+// openSessions holds clients with an open talk session so a restart, which
+// replaces the process without running deferred cleanup, can close them first.
+var openSessions sync.Map
+
+// CloseSessions closes every open talk session, at most 3 s per camera, in parallel.
+func CloseSessions() {
+	var wg sync.WaitGroup
+	openSessions.Range(func(key, _ any) bool {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = key.(*Client).Close() }()
+		return true
+	})
+	wg.Wait()
+}
+
+// errInvalidOperation is the camera refusing open because a talk session exists.
+var errInvalidOperation = errors.New("isapi: talk channel busy")
+
+// openFailures counts consecutive refused opens per camera. The stream worker
+// restarts a failed producer immediately, so the delay lives here.
+var openFailures sync.Map
+
+// claim opens the talk channel. This process never holds a second session on a
+// camera, so a refusal means a stale one (restart, lost close) or a real call.
+// Reclaim it only when no intercom call is live: plain cameras answer 404.
+func (c *Client) claim() error {
+	if err := c.backoff(); err != nil {
+		return err
+	}
+	err := c.command(c.ctx, "open")
+	if errors.Is(err, errInvalidOperation) && c.callIdle() {
+		if err = c.command(c.ctx, "close"); err == nil {
+			err = c.command(c.ctx, "open")
+		}
+	}
+	if err != nil {
+		n, _ := openFailures.LoadOrStore(c.url, new(atomic.Int32))
+		n.(*atomic.Int32).Add(1)
+		return err
+	}
+	openFailures.Delete(c.url)
+	return nil
+}
+
+func (c *Client) backoff() error {
+	n, ok := openFailures.Load(c.url)
+	if !ok {
+		return nil
+	}
+	delay := time.Second << min(n.(*atomic.Int32).Load()-1, 4)
+	select {
+	case <-time.After(min(delay, 10*time.Second)):
+		return nil
+	case <-c.ctx.Done():
+		return context.Canceled
+	}
+}
+
+func (c *Client) callIdle() bool {
+	ctx, cancel := context.WithTimeout(c.ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", c.url+"/ISAPI/VideoIntercom/callStatus?format=json", nil)
+	if err != nil {
+		return false
+	}
+	res, err := tcp.Do(req)
+	if err != nil {
+		return false
+	}
+	defer tcp.Close(res)
+	if res.StatusCode == http.StatusNotFound {
+		return true
+	}
+	var v struct{ CallStatus struct{ Status string } }
+	if res.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&v) != nil {
+		return false
+	}
+	return v.CallStatus.Status == "idle"
+}
+
 func (c *Client) command(parent context.Context, command string) error {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
@@ -238,7 +322,11 @@ func (c *Client) command(parent context.Context, command string) error {
 	}
 	code := core.Between(string(body), "<statusCode>", "<")
 	if res.StatusCode != 200 || (code != "" && code != "1") {
-		return fmt.Errorf("isapi: %s HTTP %d status %s", command, res.StatusCode, code)
+		err = fmt.Errorf("isapi: %s HTTP %d status %s", command, res.StatusCode, code)
+		if code == "4" {
+			err = fmt.Errorf("%w: %w", err, errInvalidOperation)
+		}
+		return err
 	}
 	return nil
 }
