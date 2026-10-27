@@ -18,10 +18,11 @@ import (
 func Init() {
 	var cfg struct {
 		Mod struct {
-			Listen     string           `yaml:"listen"`
-			Candidates []string         `yaml:"candidates"`
-			IceServers []pion.ICEServer `yaml:"ice_servers"`
-			Filters    webrtc.Filters   `yaml:"filters"`
+			Listen         string           `yaml:"listen"`
+			Candidates     []string         `yaml:"candidates"`
+			IceServers     []pion.ICEServer `yaml:"ice_servers"`
+			Filters        webrtc.Filters   `yaml:"filters"`
+			G711LowLatency []string         `yaml:"g711_low_latency"`
 		} `yaml:"webrtc"`
 	}
 
@@ -31,6 +32,10 @@ func Init() {
 	}
 
 	app.LoadConfig(&cfg)
+	g711LowLatencyStreams = make(map[string]bool, len(cfg.Mod.G711LowLatency))
+	for _, name := range cfg.Mod.G711LowLatency {
+		g711LowLatencyStreams[name] = true
+	}
 
 	log = app.GetLogger("webrtc")
 
@@ -114,6 +119,8 @@ var log zerolog.Logger
 
 var PeerConnection func(active bool) (*pion.PeerConnection, error)
 
+var g711LowLatencyStreams map[string]bool
+
 func asyncHandler(tr *ws.Transport, msg *ws.Message) (err error) {
 	var stream *streams.Stream
 	var mode core.Mode
@@ -169,6 +176,7 @@ func asyncHandler(tr *ws.Transport, msg *ws.Message) (err error) {
 
 	conn := webrtc.NewConn(pc)
 	conn.Mode = mode
+	conn.G711LowLatency = mode == core.ModePassiveConsumer && g711LowLatencyStreams[query.Get("src")]
 	conn.Protocol = "ws"
 	conn.UserAgent = tr.Request.UserAgent()
 	conn.Listen(func(msg any) {
@@ -239,7 +247,7 @@ func asyncHandler(tr *ws.Transport, msg *ws.Message) (err error) {
 	return nil
 }
 
-func ExchangeSDP(stream *streams.Stream, offer, desc, userAgent string) (answer string, err error) {
+func ExchangeSDP(stream *streams.Stream, offer, desc, userAgent string, lowLatency ...bool) (answer string, err error) {
 	pc, err := PeerConnection(false)
 	if err != nil {
 		log.Error().Err(err).Caller().Send()
@@ -249,6 +257,7 @@ func ExchangeSDP(stream *streams.Stream, offer, desc, userAgent string) (answer 
 	// create new webrtc instance
 	conn := webrtc.NewConn(pc)
 	conn.FormatName = desc
+	conn.G711LowLatency = len(lowLatency) == 1 && lowLatency[0]
 	conn.UserAgent = userAgent
 	conn.Protocol = "http"
 	conn.Listen(func(msg any) {
