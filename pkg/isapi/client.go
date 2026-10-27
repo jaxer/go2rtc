@@ -103,29 +103,66 @@ func Dial(rawURL string) (*Client, error) {
 	return client, nil
 }
 
+// Each camera's talk channel id and codec never change, so one probe per process is
+// enough: a cached answer lets a stream start without an HTTP round trip. go2rtc dials
+// every source of a stream before serving video, and a door station whose web server
+// is slow (gate, 2026-10-27) otherwise delays the picture by the whole probe timeout.
+var channelCache sync.Map // host -> channelInfo
+
+type channelInfo struct {
+	channel string
+	codec   string
+}
+
 func (c *Client) Dial() (err error) {
+	key := strings.ToLower(strings.TrimPrefix(c.url, "http://"))
+	info, cached := channelCache.Load(key)
+	if !cached {
+		var probed channelInfo
+		if probed, err = c.probe(); err != nil {
+			return err
+		}
+		info = probed
+		channelCache.Store(key, probed)
+	}
+	ci := info.(channelInfo)
+	c.channel = ci.channel
+	media := &core.Media{
+		Kind:      core.KindAudio,
+		Direction: core.DirectionSendonly,
+		Codecs: []*core.Codec{
+			{Name: ci.codec, ClockRate: 8000},
+		},
+	}
+	c.medias = append(c.medias, media)
+	return nil
+}
+
+// probe asks the camera for its talk channel. 2 s: a healthy camera answers in well under
+// a second, and a stalled one must not hold up the video that shares the stream.
+func (c *Client) probe() (channelInfo, error) {
 	link := c.url + "/ISAPI/System/TwoWayAudio/channels"
-	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", link, nil)
 	if err != nil {
-		return err
+		return channelInfo{}, err
 	}
 
 	res, err := tcp.Do(req)
 	if err != nil {
-		return
+		return channelInfo{}, err
 	}
 
 	if res.StatusCode != http.StatusOK {
 		tcp.Close(res)
-		return errors.New(res.Status)
+		return channelInfo{}, errors.New(res.Status)
 	}
 
 	defer tcp.Close(res)
 	b, err := io.ReadAll(io.LimitReader(res.Body, 65536))
 	if err != nil {
-		return err
+		return channelInfo{}, err
 	}
 
 	xml := string(b)
@@ -137,21 +174,10 @@ func (c *Client) Dial() (err error) {
 	case "G.711alaw":
 		codec = core.CodecPCMA
 	default:
-		return errors.New("isapi: unsupported audio codec")
+		return channelInfo{}, errors.New("isapi: unsupported audio codec")
 	}
 
-	c.channel = core.Between(xml, `<id>`, `<`)
-
-	media := &core.Media{
-		Kind:      core.KindAudio,
-		Direction: core.DirectionSendonly,
-		Codecs: []*core.Codec{
-			{Name: codec, ClockRate: 8000},
-		},
-	}
-	c.medias = append(c.medias, media)
-
-	return nil
+	return channelInfo{channel: core.Between(xml, `<id>`, `<`), codec: codec}, nil
 }
 
 // Open owns a single device session for all microphones attached to this producer.

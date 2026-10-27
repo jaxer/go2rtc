@@ -330,3 +330,34 @@ func TestCloseSessions(t *testing.T) {
 	}
 	c.Stop()
 }
+
+func TestDialUsesCachedChannelWhenTheCameraStalls(t *testing.T) {
+	var probes atomic.Int32
+	stalled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if probes.Add(1) > 1 {
+			<-stalled // the door station's web server stops answering
+			return
+		}
+		channels(w)
+	}))
+	defer server.Close()
+	defer close(stalled)
+	first, err := Dial(cameraURL(server, "#mix=1#gain=24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Stop()
+	begin := time.Now()
+	second, err := Dial(cameraURL(server, "#mix=1#gain=24"))
+	if err != nil || time.Since(begin) > 500*time.Millisecond {
+		t.Fatalf("second dial err=%v after %v: expected the cached channel", err, time.Since(begin))
+	}
+	if second.channel != "1" || second.medias[0].Codecs[0].Name != core.CodecPCMU {
+		t.Fatalf("cached channel %q codec %q", second.channel, second.medias[0].Codecs[0].Name)
+	}
+	second.Stop()
+	if probes.Load() != 1 {
+		t.Fatalf("probes=%d, want 1", probes.Load())
+	}
+}
