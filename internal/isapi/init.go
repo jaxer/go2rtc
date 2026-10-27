@@ -16,6 +16,14 @@ var log zerolog.Logger
 func Init() {
 	log = app.GetLogger("isapi")
 
+	// A session that keeps dropping and reopening shows up here with its reason
+	// instead of as silent HTTP churn on the camera.
+	isapi.OnSessionEnd = func(camera string, lived time.Duration, err error) {
+		log.Info().Err(err).Str("camera", camera).Dur("after", lived).Msg("[isapi] talk session ended")
+	}
+
+	// The producer is returned as is: streams type-asserts it as core.Consumer for
+	// backchannel tracks, so no wrapper may stand in between (7a19b93 panicked on one).
 	streams.HandleFunc("isapi", func(source string) (core.Producer, error) {
 		started := time.Now()
 		prod, err := isapi.DialShared(source)
@@ -26,29 +34,8 @@ func Init() {
 		if time.Since(started) > time.Second {
 			log.Warn().Str("camera", host(source)).Dur("after", time.Since(started)).Msg("[isapi] slow dial")
 		}
-		return &logged{Producer: prod, camera: host(source)}, nil
+		return prod, nil
 	})
-}
-
-// logged reports how every talk session ends: a session that keeps dropping and
-// reopening shows up in the log with its reason instead of as silent HTTP churn.
-type logged struct {
-	core.Producer
-	camera string
-}
-
-func (l *logged) Start() error {
-	started := time.Now()
-	err := l.Producer.Start()
-	log.Info().Err(err).Str("camera", l.camera).Dur("after", time.Since(started)).Msg("[isapi] talk session ended")
-	return err
-}
-
-func (l *logged) MarshalJSON() ([]byte, error) {
-	if m, ok := l.Producer.(interface{ MarshalJSON() ([]byte, error) }); ok {
-		return m.MarshalJSON()
-	}
-	return nil, nil
 }
 
 // host keeps credentials out of the log.

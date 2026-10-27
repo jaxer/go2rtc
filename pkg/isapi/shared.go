@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 )
@@ -36,6 +37,10 @@ type sharedClient struct {
 	stopped chan struct{}
 	closed  bool // protected by sharedCameras
 }
+
+// OnSessionEnd, when set, reports how each shared talk session ended: the camera host,
+// how long the session lived and the error Start returned. Nothing else logs here.
+var OnSessionEnd func(camera string, lived time.Duration, err error)
 
 func DialShared(raw string) (core.Producer, error) {
 	u, err := url.Parse(raw)
@@ -128,7 +133,16 @@ func (c *sharedClient) Start() error {
 		return nil
 	}
 	camera := c.camera
-	camera.once.Do(func() { go func() { camera.err = camera.client.Start(); close(camera.done) }() })
+	camera.once.Do(func() {
+		go func() {
+			started := time.Now()
+			camera.err = camera.client.Start()
+			if OnSessionEnd != nil {
+				OnSessionEnd(c.key, time.Since(started), camera.err)
+			}
+			close(camera.done)
+		}()
+	})
 	sharedCameras.Unlock()
 	select {
 	case <-c.stopped:
