@@ -13,11 +13,22 @@ import (
 //  2. Fixes Reolink Doorbell backchannel issue (zero timestamp)
 //     https://github.com/AlexxIT/go2rtc/issues/331
 func RepackG711(zeroTS bool, handler core.HandlerFunc) core.HandlerFunc {
-	const PacketSize = 1024
+	return repackG711(zeroTS, 1024, false, handler)
+}
+
+// RepackG711LowLatency emits 20ms at 8kHz. It preserves every input sample,
+// drains complete packets in order, and retains only the incomplete tail.
+// Legacy consumers retain RepackG711's 1024-byte framing and marker behavior.
+func RepackG711LowLatency(handler core.HandlerFunc) core.HandlerFunc {
+	return repackG711(false, 160, true, handler)
+}
+
+func repackG711(zeroTS bool, packetSize int, drain bool, handler core.HandlerFunc) core.HandlerFunc {
 
 	var buf []byte
 	var seq uint16
 	var ts uint32
+	first := true
 
 	// fix https://github.com/AlexxIT/go2rtc/issues/432
 	var mu sync.Mutex
@@ -26,7 +37,27 @@ func RepackG711(zeroTS bool, handler core.HandlerFunc) core.HandlerFunc {
 		mu.Lock()
 
 		buf = append(buf, packet.Payload...)
-		if len(buf) < PacketSize {
+		if len(buf) < packetSize {
+			mu.Unlock()
+			return
+		}
+
+		if drain {
+			// This path serializes delivery too; concurrent calls cannot reorder
+			// the small packets. Copy ownership before a downstream async sender.
+			for len(buf) >= packetSize {
+				pkt := &rtp.Packet{
+					Header: rtp.Header{Version: 2, Marker: first,
+						PayloadType: packet.PayloadType, SequenceNumber: seq,
+						SSRC: packet.SSRC, Timestamp: ts},
+					Payload: append([]byte(nil), buf[:packetSize]...),
+				}
+				seq++
+				first = false
+				ts += uint32(packetSize)
+				buf = buf[packetSize:]
+				handler(pkt)
+			}
 			mu.Unlock()
 			return
 		}
@@ -39,7 +70,7 @@ func RepackG711(zeroTS bool, handler core.HandlerFunc) core.HandlerFunc {
 				SequenceNumber: seq,
 				SSRC:           packet.SSRC,
 			},
-			Payload: buf[:PacketSize],
+			Payload: buf[:packetSize],
 		}
 
 		seq++
@@ -48,10 +79,10 @@ func RepackG711(zeroTS bool, handler core.HandlerFunc) core.HandlerFunc {
 		// don't have this strange devices for tests
 		if !zeroTS {
 			pkt.Timestamp = ts
-			ts += PacketSize
+			ts += uint32(packetSize)
 		}
 
-		buf = buf[PacketSize:]
+		buf = buf[packetSize:]
 
 		mu.Unlock()
 

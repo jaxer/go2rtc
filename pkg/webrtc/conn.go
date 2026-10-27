@@ -17,6 +17,8 @@ type Conn struct {
 	core.Listener
 
 	Mode core.Mode `json:"mode"`
+	// Explicit consumer opt-in; other cameras keep their legacy G.711 framing.
+	G711LowLatency bool `json:"-"`
 
 	pc *webrtc.PeerConnection
 
